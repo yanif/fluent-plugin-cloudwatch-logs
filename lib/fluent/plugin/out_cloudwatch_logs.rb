@@ -166,7 +166,7 @@ module Fluent
       when Array
         record.each {|v| scrub_record!(v) }
       when String
-        record.scrub!
+        record.scrub!.encode('UTF-8', :invalid => :replace)
       end
     end
 
