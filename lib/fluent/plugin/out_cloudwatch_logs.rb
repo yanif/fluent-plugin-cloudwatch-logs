@@ -138,7 +138,7 @@ module Fluent
         rs.each do |t, time, record|
           time_ms = time * 1000
 
-          scrub_record!(record)
+          record = scrub_record!(record)
           if @message_keys
             message = @message_keys.split(',').map {|k| record[k].to_s }.join(' ')
           else
@@ -162,11 +162,11 @@ module Fluent
     def scrub_record!(record)
       case record
       when Hash
-        record.each_value {|v| scrub_record!(v) }
+        return Hash[record.map {|k, v| [k, scrub_record!(v)] }]
       when Array
-        record.each {|v| scrub_record!(v) }
+        return record.map {|v| scrub_record!(v) }
       when String
-        record.encode('UTF-8', invalid: :replace, undef: :replace)
+        return record.encode('UTF-8', invalid: :replace, undef: :replace)
       end
     end
 
