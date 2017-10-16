@@ -1,3 +1,6 @@
+require 'fluent/input'
+require 'fluent/parser'
+
 module Fluent
   require 'fluent/mixin/config_placeholders'
 
@@ -13,6 +16,9 @@ module Fluent
 
     config_param :aws_key_id, :string, :default => nil, :secret => true
     config_param :aws_sec_key, :string, :default => nil, :secret => true
+    config_param :aws_use_sts, :bool, default: false
+    config_param :aws_sts_role_arn, :string, default: nil
+    config_param :aws_sts_session_name, :string, default: 'fluentd'
     config_param :region, :string, :default => nil
     config_param :tag, :string
     config_param :log_group_name, :string
@@ -39,9 +45,19 @@ module Fluent
 
     def start
       options = {}
-      options[:credentials] = Aws::Credentials.new(@aws_key_id, @aws_sec_key) if @aws_key_id && @aws_sec_key
       options[:region] = @region if @region
       options[:http_proxy] = @http_proxy if @http_proxy
+
+      if @aws_use_sts
+        Aws.config[:region] = options[:region]
+        options[:credentials] = Aws::AssumeRoleCredentials.new(
+          role_arn: @aws_sts_role_arn,
+          role_session_name: @aws_sts_session_name
+        )
+      else
+        options[:credentials] = Aws::Credentials.new(@aws_key_id, @aws_sec_key) if @aws_key_id && @aws_sec_key
+      end
+
       @logs = Aws::CloudWatchLogs::Client.new(options)
 
       @finished = false
@@ -56,20 +72,23 @@ module Fluent
     private
     def configure_parser(conf)
       if conf['format']
-        @parser = TextParser.new
+        @parser = Fluent::TextParser.new
         @parser.configure(conf)
       end
     end
 
-    def next_token
-      return nil unless File.exist?(@state_file)
-      File.read(@state_file).chomp
+    def state_file_for(log_stream_name)
+      return "#{@state_file}_#{log_stream_name.gsub(File::SEPARATOR, '-')}" if log_stream_name
+      return @state_file
+    end
+
+    def next_token(log_stream_name)
+      return nil unless File.exist?(state_file_for(log_stream_name))
+      File.read(state_file_for(log_stream_name)).chomp
     end
 
     def store_next_token(token, log_stream_name = nil)
-      state_file = @state_file
-      state_file = "#{@state_file}_#{log_stream_name}" if log_stream_name
-      open(state_file, 'w') do |f|
+      open(state_file_for(log_stream_name), 'w') do |f|
         f.write token
       end
     end
@@ -87,13 +106,13 @@ module Fluent
               log_stream_name = log_stram.log_stream_name
               events = get_events(log_stream_name)
               events.each do |event|
-                emit(event)
+                emit(log_stream_name, event)
               end
             end
           else
             events = get_events(@log_stream_name)
             events.each do |event|
-              emit(event)
+              emit(log_stream_name, event)
             end
           end
         end
@@ -101,7 +120,7 @@ module Fluent
       end
     end
 
-    def emit(event)
+    def emit(stream, event)
       if @parser
         record = @parser.parse(event.message)
         router.emit(@tag, record[0], record[1])
@@ -117,7 +136,7 @@ module Fluent
         log_group_name: @log_group_name,
         log_stream_name: log_stream_name
       }
-      request[:next_token] = next_token if next_token
+      request[:next_token] = next_token(log_stream_name) if next_token(log_stream_name)
       response = @logs.get_log_events(request)
       store_next_token(response.next_forward_token, log_stream_name)
 
